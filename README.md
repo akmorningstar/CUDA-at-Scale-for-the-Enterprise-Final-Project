@@ -2,7 +2,7 @@
 
 ## Project Description
 
-This project demonstrates GPU-accelerated batch image processing using custom CUDA kernels. The program generates or reads a batch of grayscale PGM images, processes every image on the GPU, and writes both processed output images and an execution log.
+This project demonstrates GPU-accelerated batch image processing using custom CUDA kernels. The program generates or reads a batch of grayscale png images, processes every image on the GPU, and writes both processed output images and an execution log.
 
 The submitted configuration processes **256 grayscale images** of size **256x256**, satisfying the requirement to process hundreds of small pieces of image data.
 
@@ -19,7 +19,7 @@ The project uses two CUDA kernels:
    - Produces an edge map showing sharp transitions in the image.
    - Each CUDA thread processes one output pixel.
 
-The CPU is responsible for generating or loading PGM images and writing outputs. The actual image-processing operations are performed on the GPU.
+The CPU is responsible for generating or loading png images and writing outputs. The actual image-processing operations are performed on the GPU.
 
 ## Repository Structure
 
@@ -28,7 +28,7 @@ The CPU is responsible for generating or loading PGM images and writing outputs.
 ├── main.cu              # CUDA/C++ source code
 ├── Makefile             # Build and run targets
 ├── run.sh               # Reproducible execution script
-├── input/               # Generated input PGM images after running
+├── input/               # Generated input png images after running
 ├── output/              # Processed output images after running
 │   ├── blur/            # Box blur outputs
 │   └── edge/            # Sobel edge outputs
@@ -64,12 +64,12 @@ Manual equivalent:
 ## CLI Arguments
 
 ```text
---input_dir      Directory containing input PGM images
+--input_dir      Directory containing input png images
 --output_dir     Directory where processed images are written
 --num_images     Number of images to process
 --width          Width of generated/read images
 --height         Height of generated/read images
---generate       1 = generate synthetic PGM images, 0 = read existing PGM images
+--generate       1 = generate synthetic png images, 0 = read existing png images
 ```
 
 ## Outputs
@@ -77,9 +77,9 @@ Manual equivalent:
 After execution, the project writes:
 
 ```text
-input/image_0000.pgm
-output/blur/image_0000_blur.pgm
-output/edge/image_0000_edge.pgm
+input/image_0000.png
+output/blur/image_0000_blur.png
+output/edge/image_0000_edge.png
 logs/execution_log.csv
 ```
 
