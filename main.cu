@@ -1,9 +1,13 @@
-#include <cuda_runtime.h>
+#define STBI_NO_SIMD
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 #include <algorithm>
-#include <chrono>
-#include <cstdio>
 #include <cstdlib>
+#include <cuda_runtime.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -31,7 +35,7 @@ struct Config {
         }                                                                      \
     } while (0)
 
-static void makeDirectory(const std::string &path) {
+static void makeDirectory(const std::string& path) {
     std::string command = "mkdir -p \"" + path + "\"";
     int rc = std::system(command.c_str());
     if (rc != 0) {
@@ -39,17 +43,22 @@ static void makeDirectory(const std::string &path) {
     }
 }
 
-static std::string imagePath(const std::string &dir, int index, const std::string &suffix = "") {
+static std::string imagePath(const std::string& dir,
+                             int index,
+                             const std::string& suffix = "") {
     std::ostringstream oss;
-    oss << dir << "/image_" << std::setw(4) << std::setfill('0') << index << suffix << ".pgm";
+    oss << dir << "/image_" << std::setw(4) << std::setfill('0')
+        << index << suffix << ".png";
     return oss.str();
 }
 
-static Config parseArguments(int argc, char **argv) {
+static Config parseArguments(int argc, char** argv) {
     Config cfg;
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        auto requireValue = [&](const std::string &name) -> std::string {
+
+        auto requireValue = [&](const std::string& name) -> std::string {
             if (i + 1 >= argc) {
                 throw std::runtime_error("Missing value for argument: " + name);
             }
@@ -69,9 +78,18 @@ static Config parseArguments(int argc, char **argv) {
         } else if (arg == "--generate") {
             cfg.generate = std::stoi(requireValue(arg)) != 0;
         } else if (arg == "--help") {
-            std::cout << "Usage: ./cuda_image_pipeline "
-                      << "--input_dir input --output_dir output "
-                      << "--num_images 256 --width 256 --height 256 --generate 1\n";
+            std::cout
+                << "Usage:\n"
+                << "  ./cuda_image_pipeline "
+                << "--input_dir input --output_dir output "
+                << "--num_images 256 --width 256 --height 256 --generate 1\n\n"
+                << "Arguments:\n"
+                << "  --input_dir     Directory containing PNG input images\n"
+                << "  --output_dir    Directory for PNG output images\n"
+                << "  --num_images    Number of images to generate/process\n"
+                << "  --width         Width for generated images\n"
+                << "  --height        Height for generated images\n"
+                << "  --generate      1 = generate synthetic PNG inputs, 0 = read existing PNG inputs\n";
             std::exit(EXIT_SUCCESS);
         } else {
             throw std::runtime_error("Unknown argument: " + arg);
@@ -81,63 +99,83 @@ static Config parseArguments(int argc, char **argv) {
     if (cfg.numImages <= 0 || cfg.width <= 0 || cfg.height <= 0) {
         throw std::runtime_error("num_images, width, and height must be positive");
     }
+
     return cfg;
 }
 
-static std::vector<unsigned char> generateImage(int width, int height, int imageIndex) {
+static std::vector<unsigned char> generateImage(int width,
+                                                int height,
+                                                int imageIndex) {
     std::vector<unsigned char> pixels(width * height);
+
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             int gradient = (x * 255) / std::max(1, width - 1);
             int stripe = ((x / 16 + y / 16 + imageIndex) % 2) ? 70 : 0;
-            int circle = ((x - width / 2) * (x - width / 2) + (y - height / 2) * (y - height / 2))
-                         < ((width / 5 + imageIndex % 17) * (height / 5 + imageIndex % 13))
-                         ? 80 : 0;
+
+            int dx = x - width / 2;
+            int dy = y - height / 2;
+            int radiusX = width / 5 + imageIndex % 17;
+            int radiusY = height / 5 + imageIndex % 13;
+            int circle = (dx * dx + dy * dy) < (radiusX * radiusY) ? 80 : 0;
+
             int value = (gradient + stripe + circle + imageIndex * 3) % 256;
             pixels[y * width + x] = static_cast<unsigned char>(value);
         }
     }
+
     return pixels;
 }
 
-static void writePgm(const std::string &path, const std::vector<unsigned char> &pixels, int width, int height) {
-    std::ofstream out(path, std::ios::binary);
-    if (!out) {
-        throw std::runtime_error("Could not open output image: " + path);
+static std::vector<unsigned char> loadGrayscalePng(const std::string& filePath,
+                                                   int& width,
+                                                   int& height) {
+    int channels = 0;
+
+    unsigned char* data =
+        stbi_load(filePath.c_str(), &width, &height, &channels, 1);
+
+    if (!data) {
+        std::string reason = stbi_failure_reason()
+                                 ? std::string(stbi_failure_reason())
+                                 : "unknown reason";
+        throw std::runtime_error("Failed to load PNG: " + filePath +
+                                 " (" + reason + ")");
     }
-    out << "P5\n" << width << " " << height << "\n255\n";
-    out.write(reinterpret_cast<const char *>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+
+    std::vector<unsigned char> image(data, data + width * height);
+    stbi_image_free(data);
+
+    return image;
 }
 
-static std::vector<unsigned char> readPgm(const std::string &path, int expectedWidth, int expectedHeight) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        throw std::runtime_error("Could not open input image: " + path);
+static void saveGrayscalePng(const std::string& filePath,
+                             const std::vector<unsigned char>& pixels,
+                             int width,
+                             int height) {
+    if (static_cast<int>(pixels.size()) != width * height) {
+        throw std::runtime_error("Image buffer size does not match dimensions: " +
+                                 filePath);
     }
 
-    std::string magic;
-    int width = 0;
-    int height = 0;
-    int maxValue = 0;
-    in >> magic >> width >> height >> maxValue;
-    in.get(); // consume one newline after header
+    int strideBytes = width;
 
-    if (magic != "P5" || maxValue != 255) {
-        throw std::runtime_error("Only binary P5 PGM images with max value 255 are supported: " + path);
-    }
-    if (width != expectedWidth || height != expectedHeight) {
-        throw std::runtime_error("Input image dimensions do not match requested width/height: " + path);
-    }
+    int ok = stbi_write_png(filePath.c_str(),
+                            width,
+                            height,
+                            1,
+                            pixels.data(),
+                            strideBytes);
 
-    std::vector<unsigned char> pixels(width * height);
-    in.read(reinterpret_cast<char *>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
-    if (!in) {
-        throw std::runtime_error("Could not read full image payload: " + path);
+    if (!ok) {
+        throw std::runtime_error("Failed to write PNG: " + filePath);
     }
-    return pixels;
 }
 
-__global__ void boxBlurKernel(const unsigned char *input, unsigned char *output, int width, int height) {
+__global__ void boxBlurKernel(const unsigned char* input,
+                              unsigned char* output,
+                              int width,
+                              int height) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -147,20 +185,26 @@ __global__ void boxBlurKernel(const unsigned char *input, unsigned char *output,
 
     int sum = 0;
     int count = 0;
+
     for (int dy = -1; dy <= 1; ++dy) {
         for (int dx = -1; dx <= 1; ++dx) {
             int nx = x + dx;
             int ny = y + dy;
+
             if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
                 sum += input[ny * width + nx];
                 ++count;
             }
         }
     }
+
     output[y * width + x] = static_cast<unsigned char>(sum / count);
 }
 
-__global__ void sobelEdgeKernel(const unsigned char *input, unsigned char *output, int width, int height) {
+__global__ void sobelEdgeKernel(const unsigned char* input,
+                                unsigned char* output,
+                                int width,
+                                int height) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -173,14 +217,31 @@ __global__ void sobelEdgeKernel(const unsigned char *input, unsigned char *outpu
         return;
     }
 
-    int gx = -input[(y - 1) * width + (x - 1)] - 2 * input[y * width + (x - 1)] - input[(y + 1) * width + (x - 1)]
-             + input[(y - 1) * width + (x + 1)] + 2 * input[y * width + (x + 1)] + input[(y + 1) * width + (x + 1)];
+    int gx =
+        -input[(y - 1) * width + (x - 1)]
+        - 2 * input[y * width + (x - 1)]
+        - input[(y + 1) * width + (x - 1)]
+        + input[(y - 1) * width + (x + 1)]
+        + 2 * input[y * width + (x + 1)]
+        + input[(y + 1) * width + (x + 1)];
 
-    int gy = -input[(y - 1) * width + (x - 1)] - 2 * input[(y - 1) * width + x] - input[(y - 1) * width + (x + 1)]
-             + input[(y + 1) * width + (x - 1)] + 2 * input[(y + 1) * width + x] + input[(y + 1) * width + (x + 1)];
+    int gy =
+        -input[(y - 1) * width + (x - 1)]
+        - 2 * input[(y - 1) * width + x]
+        - input[(y - 1) * width + (x + 1)]
+        + input[(y + 1) * width + (x - 1)]
+        + 2 * input[(y + 1) * width + x]
+        + input[(y + 1) * width + (x + 1)];
 
-    int magnitude = abs(gx) + abs(gy);
-    output[y * width + x] = static_cast<unsigned char>(min(255, magnitude));
+    int absGx = gx < 0 ? -gx : gx;
+    int absGy = gy < 0 ? -gy : gy;
+    int magnitude = absGx + absGy;
+
+    if (magnitude > 255) {
+        magnitude = 255;
+    }
+
+    output[y * width + x] = static_cast<unsigned char>(magnitude);
 }
 
 static float elapsedMs(cudaEvent_t start, cudaEvent_t stop) {
@@ -189,27 +250,41 @@ static float elapsedMs(cudaEvent_t start, cudaEvent_t stop) {
     return ms;
 }
 
-static void processImageOnGpu(const std::vector<unsigned char> &input,
-                              std::vector<unsigned char> &blurred,
-                              std::vector<unsigned char> &edges,
+static void processImageOnGpu(const std::vector<unsigned char>& input,
+                              std::vector<unsigned char>& blurred,
+                              std::vector<unsigned char>& edges,
                               int width,
                               int height,
-                              float &blurMs,
-                              float &edgeMs) {
+                              float& blurMs,
+                              float& edgeMs) {
+    if (input.empty()) {
+        throw std::runtime_error("Cannot process empty image");
+    }
+
     size_t bytes = input.size() * sizeof(unsigned char);
 
-    unsigned char *dInput = nullptr;
-    unsigned char *dBlur = nullptr;
-    unsigned char *dEdge = nullptr;
+    blurred.resize(input.size());
+    edges.resize(input.size());
+
+    unsigned char* dInput = nullptr;
+    unsigned char* dBlur = nullptr;
+    unsigned char* dEdge = nullptr;
+
     CUDA_CHECK(cudaMalloc(&dInput, bytes));
     CUDA_CHECK(cudaMalloc(&dBlur, bytes));
     CUDA_CHECK(cudaMalloc(&dEdge, bytes));
+
     CUDA_CHECK(cudaMemcpy(dInput, input.data(), bytes, cudaMemcpyHostToDevice));
 
     dim3 block(16, 16);
-    dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y);
+    dim3 grid((width + block.x - 1) / block.x,
+              (height + block.y - 1) / block.y);
 
-    cudaEvent_t blurStart, blurStop, edgeStart, edgeStop;
+    cudaEvent_t blurStart;
+    cudaEvent_t blurStop;
+    cudaEvent_t edgeStart;
+    cudaEvent_t edgeStop;
+
     CUDA_CHECK(cudaEventCreate(&blurStart));
     CUDA_CHECK(cudaEventCreate(&blurStop));
     CUDA_CHECK(cudaEventCreate(&edgeStart));
@@ -236,14 +311,16 @@ static void processImageOnGpu(const std::vector<unsigned char> &input,
     CUDA_CHECK(cudaEventDestroy(blurStop));
     CUDA_CHECK(cudaEventDestroy(edgeStart));
     CUDA_CHECK(cudaEventDestroy(edgeStop));
+
     CUDA_CHECK(cudaFree(dInput));
     CUDA_CHECK(cudaFree(dBlur));
     CUDA_CHECK(cudaFree(dEdge));
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     try {
         Config cfg = parseArguments(argc, argv);
+
         makeDirectory(cfg.inputDir);
         makeDirectory(cfg.outputDir);
         makeDirectory(cfg.outputDir + "/blur");
@@ -254,50 +331,81 @@ int main(int argc, char **argv) {
         if (!log) {
             throw std::runtime_error("Could not open logs/execution_log.csv");
         }
-        log << "image_id,width,height,blur_ms,edge_ms,total_ms\n";
+
+        log << "image_id,input_path,width,height,blur_ms,edge_ms,total_ms\n";
 
         double totalBlur = 0.0;
         double totalEdge = 0.0;
 
         for (int i = 0; i < cfg.numImages; ++i) {
             std::string inputPath = imagePath(cfg.inputDir, i);
+
+            int currentWidth = cfg.width;
+            int currentHeight = cfg.height;
             std::vector<unsigned char> input;
 
             if (cfg.generate) {
                 input = generateImage(cfg.width, cfg.height, i);
-                writePgm(inputPath, input, cfg.width, cfg.height);
+                saveGrayscalePng(inputPath, input, cfg.width, cfg.height);
             } else {
-                input = readPgm(inputPath, cfg.width, cfg.height);
+                input = loadGrayscalePng(inputPath, currentWidth, currentHeight);
             }
 
-            std::vector<unsigned char> blurred(input.size());
-            std::vector<unsigned char> edges(input.size());
+            std::vector<unsigned char> blurred;
+            std::vector<unsigned char> edges;
+
             float blurMs = 0.0f;
             float edgeMs = 0.0f;
 
-            processImageOnGpu(input, blurred, edges, cfg.width, cfg.height, blurMs, edgeMs);
+            processImageOnGpu(input,
+                              blurred,
+                              edges,
+                              currentWidth,
+                              currentHeight,
+                              blurMs,
+                              edgeMs);
 
-            writePgm(imagePath(cfg.outputDir + "/blur", i, "_blur"), blurred, cfg.width, cfg.height);
-            writePgm(imagePath(cfg.outputDir + "/edge", i, "_edge"), edges, cfg.width, cfg.height);
+            saveGrayscalePng(imagePath(cfg.outputDir + "/blur", i, "_blur"),
+                             blurred,
+                             currentWidth,
+                             currentHeight);
+
+            saveGrayscalePng(imagePath(cfg.outputDir + "/edge", i, "_edge"),
+                             edges,
+                             currentWidth,
+                             currentHeight);
 
             float totalMs = blurMs + edgeMs;
-            log << i << "," << cfg.width << "," << cfg.height << ","
-                << std::fixed << std::setprecision(4) << blurMs << "," << edgeMs << "," << totalMs << "\n";
+
+            log << i << ","
+                << inputPath << ","
+                << currentWidth << ","
+                << currentHeight << ","
+                << std::fixed << std::setprecision(4)
+                << blurMs << ","
+                << edgeMs << ","
+                << totalMs << "\n";
 
             totalBlur += blurMs;
             totalEdge += edgeMs;
         }
 
-        std::cout << "Processed " << cfg.numImages << " images of size "
-                  << cfg.width << "x" << cfg.height << " using CUDA kernels.\n";
-        std::cout << "Average blur kernel time: " << (totalBlur / cfg.numImages) << " ms\n";
-        std::cout << "Average edge kernel time: " << (totalEdge / cfg.numImages) << " ms\n";
+        std::cout << "Processed " << cfg.numImages
+                  << " PNG images using CUDA kernels.\n";
+
+        std::cout << "Average blur kernel time: "
+                  << (totalBlur / cfg.numImages) << " ms\n";
+
+        std::cout << "Average edge kernel time: "
+                  << (totalEdge / cfg.numImages) << " ms\n";
+
+        std::cout << "Inputs written/read from: " << cfg.inputDir << "\n";
         std::cout << "Outputs written to: " << cfg.outputDir << "\n";
         std::cout << "Execution log written to: logs/execution_log.csv\n";
 
         CUDA_CHECK(cudaDeviceReset());
         return EXIT_SUCCESS;
-    } catch (const std::exception &ex) {
+    } catch (const std::exception& ex) {
         std::cerr << "Error: " << ex.what() << std::endl;
         return EXIT_FAILURE;
     }
